@@ -1,0 +1,9 @@
+anonymize_users: true
+anonymize_emails: true
+anonymize_urls: true
+anonymize_customfield_values: true
+
+# Optional path to a YAML file containing custom field mappings.
+# If omitted here, you can still pass --customfield-map to the CLI.
+customfield_map_path: config/customfield-map.example.yml
+

@@ -1,0 +1,26 @@
+{
+  "expand": "schema,names",
+  "issues": [
+    {
+      "id": "10001",
+      "key": "DEMO-1",
+      "self": "https://your-domain.atlassian.net/rest/api/3/issue/10001",
+      "fields": {
+        "summary": "Example issue summary",
+        "reporter": {
+          "accountId": "abc123",
+          "displayName": "Alice Example",
+          "emailAddress": "alice@example.com"
+        },
+        "assignee": {
+          "accountId": "def456",
+          "displayName": "Bob Example",
+          "emailAddress": "bob@example.com"
+        },
+        "customfield_10026": 5,
+        "customfield_10400": "Team Alpha"
+      }
+    }
+  ]
+}
+

@@ -1,0 +1,8 @@
+# Example mapping from JIRA custom field IDs to friendly names.
+#
+# Adjust these to match your own JIRA instance before running the anonymizer.
+#
+# customfield_10026: customfield_story_points
+# customfield_10123: customfield_epic_link
+# customfield_10400: customfield_team
+
