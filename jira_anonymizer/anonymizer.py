@@ -117,9 +117,11 @@ class Anonymizer:
         """
         return self._walk(deepcopy(data))
 
-    # Internal helpers -----------------------------------------------------
-
     def _walk(self, node: Any, parent_key: str | None = None) -> Any:
+        """
+        Recursively traverse the JIRA JSON tree, keeping the original structure
+        but routing nodes into the appropriate anonymization helpers.
+        """
         if isinstance(node, dict):
             return self._walk_dict(node, parent_key=parent_key)
         if isinstance(node, list):
@@ -129,7 +131,15 @@ class Anonymizer:
         return node
 
     def _walk_dict(self, obj: Dict[str, Any], parent_key: str | None = None) -> Dict[str, Any]:
-        # Special handling for JIRA user objects.
+        """
+        Traverse a single object node, handling structural concerns:
+        - Detect and delegate real JIRA user dictionaries.
+        - Drop attachments.
+        - Rename customfield keys.
+        - Delegate scalar anonymization to _anonymize_primitive_field.
+        - Recurse into nested dicts/lists via _walk.
+        """
+        # Special handling for JIRA user objects, delegated to a dedicated helper.
         if self._config.anonymize_users and self._looks_like_user(obj):
             return self._anonymize_user_object(obj)
 
@@ -156,7 +166,12 @@ class Anonymizer:
 
     @staticmethod
     def _looks_like_user(obj: Mapping[str, Any]) -> bool:
-        # Heuristic: typical JIRA user object keys.
+        """
+        Heuristic for recognizing a JIRA user dictionary based on its keys.
+        Traversal code uses this to decide when to hand off to
+        _anonymize_user_object instead of treating the mapping as a generic
+        dictionary.
+        """
         user_keys = {"accountId", "emailAddress", "displayName"}
         return any(k in obj for k in user_keys)
 
@@ -197,12 +212,24 @@ class Anonymizer:
             anon_id = self._mappings.user_id(name)
             user["name"] = anon_id
 
-        # Use the already-synced "self" URL as-is (do not pass through _walk),
-        # so it is never run through _anonymize_url and stays in sync with accountId.
+        # Decide how to handle the self URL:
+        # - When account IDs are anonymized, we keep `self` in sync with the
+        #   anonymized accountId and do not run it through URL anonymization.
+        # - When account IDs are left as-is but URL anonymization is enabled,
+        #   we still anonymize numeric identifiers inside the URL like any
+        #   other URL in the payload.
+        anon_self: str | None = None
+        self_url = user.get("self")
+        if isinstance(self_url, str) and not self._config.anonymize_account_ids and self._config.anonymize_urls:
+            anon_self = self._anonymize_url(self_url)
+
         result: Dict[str, Any] = {}
         for k, v in user.items():
             if k == "self":
-                result[k] = user["self"]
+                if anon_self is not None:
+                    result[k] = anon_self
+                else:
+                    result[k] = self_url
             else:
                 result[k] = self._walk(v, parent_key=k)
         return result
@@ -223,8 +250,10 @@ class Anonymizer:
         replacements in sequence.
         """
         text = self._replace_issue_keys_in_text(text)
-        text = self._replace_inline_account_ids_in_text(text)
-        text = self._replace_emails_in_text(text)
+        if self._config.anonymize_account_ids:
+            text = self._replace_inline_account_ids_in_text(text)
+        if self._config.anonymize_emails:
+            text = self._replace_emails_in_text(text)
         text = self._replace_company_names_in_text(text)
         text = self._replace_numbers_in_text(text)
         return text
