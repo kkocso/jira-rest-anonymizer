@@ -112,11 +112,19 @@ class Anonymizer:
                 user["displayName"] = f"User {anon_id.split('_')[-1]}"
 
         name = user.get("name")
-        if isinstance(name, str):
+        if isinstance(name, str) and self._config.anonymize_account_ids:
             anon_id = self._mappings.user_id(name)
             user["name"] = anon_id
 
-        return {k: self._walk(v, parent_key=k) for k, v in user.items()}
+        # Use the already-synced "self" URL as-is (do not pass through _walk),
+        # so it is never run through _anonymize_url and stays in sync with accountId.
+        result: Dict[str, Any] = {}
+        for k, v in user.items():
+            if k == "self":
+                result[k] = user["self"]
+            else:
+                result[k] = self._walk(v, parent_key=k)
+        return result
 
     # Activity filtering (worklog, changelog, etc.) ------------------------
 
@@ -158,7 +166,12 @@ class Anonymizer:
                 filtered.append(item)
                 continue
             ts_str = item.get("created") or item.get("started")
-            if isinstance(ts_str, str) and self._within_activity_window(ts_str):
+            # If there is no timestamp, keep the item unconditionally.
+            if not isinstance(ts_str, str):
+                filtered.append(item)
+                continue
+            # Only filter out items when we have a valid, parseable timestamp.
+            if self._within_activity_window(ts_str):
                 filtered.append(item)
         return filtered
 
@@ -172,8 +185,8 @@ class Anonymizer:
         - Replacing likely company names (sequences of capitalized words).
         """
 
-        # 0) Issue keys like ONEQAE-262 appearing in free text.
-        issue_key_pattern = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
+        # 0) Issue keys like QAE-26 appearing in free text.
+        issue_key_pattern = re.compile(r"\b[A-Z][A-Z0-9]*-\d+\b")
 
         def _issue_key_replace(match: re.Match[str]) -> str:
             key = match.group(0)
@@ -210,7 +223,9 @@ class Anonymizer:
 
         text = company_pattern.sub(_company_replace, text)
 
-        # 4) Numbers: replace standalone numbers, but keep things like "h2".
+        # 4) Numbers: replace standalone numbers, but keep things like "h2"
+        # and avoid re-anonymizing numbers that are already part of
+        # anonymized issue keys (e.g. JIRAPROJ_001-00179).
         number_pattern = re.compile(r"\b\d+\b")
 
         def _number_replace(match: re.Match[str]) -> str:
@@ -221,6 +236,19 @@ class Anonymizer:
                 prev_char = text[start - 1]
                 if prev_char in {"h", "H"} and digits in {"1", "2", "3", "4", "5", "6"}:
                     return digits
+                # If this number is immediately preceded by a dash that is
+                # itself preceded by a valid JIRA project key prefix
+                # (uppercase letters/digits), treat it as part of an issue key
+                # and leave it unchanged.
+                if prev_char == "-":
+                    i = start - 2
+                    while i >= 0 and (text[i].isalnum() or text[i] == "_"):
+                        i -= 1
+                    # Extract the candidate prefix.
+                    if i < start - 2:
+                        prefix = text[i + 1 : start - 1]
+                        if re.fullmatch(r"[A-Z][A-Z0-9]*", prefix):
+                            return digits
             return self._mappings.number(digits, len(digits))
 
         text = number_pattern.sub(_number_replace, text)
@@ -236,15 +264,16 @@ class Anonymizer:
 
         # Changelog value fields
         if key in {"from", "to"}:
-            # Issue keys like ONEQAE-262
-            if re.fullmatch(r"([A-Z][A-Z0-9]+)-(\d+)", value):
+            # Issue keys like QAE-26
+            if re.fullmatch(r"([A-Z][A-Z0-9]*)-(\d+)", value):
                 return self._anonymize_issue_key(value)
             # Plain numeric IDs (e.g. sprint IDs like 9884)
             if value.isdigit():
                 return self._mappings.number(value, len(value))
 
-        if key in {"fromString", "toString"} and parent_key in {"changelog", "histories"}:
-            # Treat as rich text: anonymize issue keys, emails, numbers, etc.
+        if key in {"fromString", "toString"}:
+            # Treat as rich text wherever it appears: anonymize issue keys,
+            # emails, numbers, company names, etc.
             return self._anonymize_rich_text(value)
 
         if key == "fieldId" and value.startswith("customfield_"):
@@ -276,9 +305,9 @@ class Anonymizer:
             return self._mappings.number(value, len(value))
 
         # URLs
-        # For user objects (reporter, assignee, etc.) we already keep `self`
-        # in sync with the anonymized accountId inside `_anonymize_user_object`,
-        # so avoid further URL anonymization there.
+        # Skip when the object containing this "self" was reached via a user-role key
+        # (parent_key is that key). User objects are handled in _anonymize_user_object,
+        # which keeps "self" in sync with accountId and does not pass it through here.
         if (
             self._config.anonymize_urls
             and key == "self"
@@ -305,7 +334,7 @@ class Anonymizer:
         - The numeric part (e.g. "1179") is replaced with a stable, fake
           number via MappingStore.number, preserving length.
         """
-        match = re.fullmatch(r"([A-Z][A-Z0-9]+)-(\d+)", value)
+        match = re.fullmatch(r"([A-Z][A-Z0-9]*)-(\d+)", value)
         if not match:
             return value
 
@@ -335,8 +364,9 @@ class Anonymizer:
         with a deterministic, same-length pseudonym, preserving dashes.
         """
 
-        # Match UUID-like hex-with-dashes segments used in avatar URLs.
-        pattern = re.compile(r"[0-9a-fA-F]{6,}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+        # Match one or more hex segments separated by dashes, with no fixed
+        # requirements on segment length or count (e.g. "abc-def-1234-56").
+        pattern = re.compile(r"[0-9a-fA-F]+(?:-[0-9a-fA-F]+)+")
 
         def _replace(match: re.Match[str]) -> str:
             token = match.group(0)

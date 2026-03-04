@@ -69,14 +69,25 @@ class MappingStore:
 
         The same original digit sequence will always map to the same
         replacement, and different sequences get different replacements.
-        The replacement preserves the original length by zero-padding.
+        The replacement preserves the original length by zero-padding
+        as long as there is still unused space for that length; if the
+        numeric space is exhausted, the anonymized value may grow in
+        length to avoid collisions.
         """
         if value in self.numbers:
             return self.numbers[value]
 
-        current_ids = [int(v) for v in self.numbers.values() if v.isdigit()]
+        used_values = set(self.numbers.values())
+        current_ids = [int(v) for v in used_values if v.isdigit()]
         next_index = max(current_ids, default=0) + 1
-        anonymized = str(next_index).zfill(length)
+
+        # Find the next unused numeric string, zero-padded to `length` where possible.
+        while True:
+            anonymized = str(next_index).zfill(length)
+            if anonymized not in used_values:
+                break
+            next_index += 1
+
         self.numbers[value] = anonymized
         return anonymized
 
@@ -100,10 +111,11 @@ class MappingStore:
         if value in self.avatars:
             return self.avatars[value]
 
-        base = self._next_id("avatar", self.avatars)
-        pattern_source = (base + "abcdef0123456789").replace("-", "")
-        if not pattern_source:
-            pattern_source = "abcdef0123456789"
+        # Use the current avatar count as a simple, stable index to derive
+        # a hex-only pattern source. This avoids relying on _next_id, which
+        # expects values in the target store to be prefixed with "avatar_".
+        idx = len(self.avatars) + 1
+        pattern_source = f"{idx:x}" + "0123456789abcdef"
 
         chars = []
         j = 0

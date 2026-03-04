@@ -6,8 +6,8 @@ anonymize_urls: true
 anonymize_customfield_values: true
 
 # Optional path to a YAML file containing custom field mappings.
-# If omitted here, you can still pass --customfield-map to the CLI.
-customfield_map_path: config/customfield-map.yml
+# If omitted here or left empty, you can still pass --customfield-map to the CLI.
+customfield_map_path:
 
 # Optional activity window for worklog/changelog-style entries.
 # Format: YYYY-MM-DDTHH:MM:SS.sss+ZZZZ (e.g. 2026-02-24T12:29:54.873+0100)
