@@ -121,8 +121,10 @@ class Anonymizer:
 
         display_name = user.get("displayName")
         if self._config.anonymize_display_names and isinstance(display_name, str):
-            # If we have an anonymized email, derive displayName from its local part
-            # so the connection between displayName and emailAddress is obvious.
+            # When an email address is present, derive displayName from the same
+            # underlying anonymized identifier so you can immediately see which
+            # display name belongs to which email. Otherwise, fall back to a
+            # deterministic mapping based on the displayName itself.
             if anon_email_local:
                 suffix = anon_email_local.split("_")[-1] if "_" in anon_email_local else anon_email_local
                 user["displayName"] = f"User {suffix}"
@@ -299,8 +301,9 @@ class Anonymizer:
             return self._anonymize_rich_text(value)
 
         if key == "fieldId" and value.startswith("customfield_"):
-            # Mirror customfield key renaming for changelog fieldId values.
-            return self._mappings.customfield_key(value)
+            # Mirror customfield key renaming for changelog fieldId values,
+            # including any explicit mappings from the customfield map.
+            return self._rename_customfield_key(value)
 
         # Emails
         if self._config.anonymize_emails and key == "emailAddress":
