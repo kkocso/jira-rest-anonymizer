@@ -1,9 +1,18 @@
 anonymize_users: true
+anonymize_account_ids: true
 anonymize_emails: true
+anonymize_display_names: true
 anonymize_urls: true
 anonymize_customfield_values: true
 
 # Optional path to a YAML file containing custom field mappings.
 # If omitted here, you can still pass --customfield-map to the CLI.
-customfield_map_path: config/customfield-map.example.yml
+customfield_map_path: config/customfield-map.yml
+
+# Optional activity window for worklog/changelog-style entries.
+# Format: YYYY-MM-DDTHH:MM:SS.sss+ZZZZ (e.g. 2026-02-24T12:29:54.873+0100)
+# Only entries whose timestamp falls within [activity_start_timestamp, activity_end_timestamp]
+# will be kept. Leave empty or omit to keep all entries.
+activity_start_timestamp:
+activity_end_timestamp:
 

@@ -10,10 +10,14 @@ import yaml
 @dataclass
 class AnonymizerConfig:
     anonymize_users: bool = True
+    anonymize_account_ids: bool = True
     anonymize_emails: bool = True
+    anonymize_display_names: bool = True
     anonymize_urls: bool = True
     anonymize_customfield_values: bool = True
     customfield_map_path: str | None = None
+    activity_start_timestamp: str | None = None
+    activity_end_timestamp: str | None = None
 
 
 def load_config(path: Path) -> AnonymizerConfig:
@@ -25,10 +29,14 @@ def load_config(path: Path) -> AnonymizerConfig:
 
     return AnonymizerConfig(
         anonymize_users=bool(raw.get("anonymize_users", True)),
+        anonymize_account_ids=bool(raw.get("anonymize_account_ids", True)),
         anonymize_emails=bool(raw.get("anonymize_emails", True)),
+        anonymize_display_names=bool(raw.get("anonymize_display_names", True)),
         anonymize_urls=bool(raw.get("anonymize_urls", True)),
         anonymize_customfield_values=bool(raw.get("anonymize_customfield_values", True)),
         customfield_map_path=raw.get("customfield_map_path"),
+        activity_start_timestamp=raw.get("activity_start_timestamp"),
+        activity_end_timestamp=raw.get("activity_end_timestamp"),
     )
 
 

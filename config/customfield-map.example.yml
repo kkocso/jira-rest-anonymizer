@@ -2,7 +2,7 @@
 #
 # Adjust these to match your own JIRA instance before running the anonymizer.
 #
-# customfield_10026: customfield_story_points
-# customfield_10123: customfield_epic_link
-# customfield_10400: customfield_team
+# customfield_10000: customfield_story_points
+# customfield_10001: customfield_epic_link
+# customfield_10002: customfield_team
 
