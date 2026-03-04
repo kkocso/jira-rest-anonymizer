@@ -19,6 +19,14 @@ USER_ROLE_KEYS = {"reporter", "assignee", "creator", "author", "updateAuthor", "
 ATTACHMENT_KEYS = {"attachment", "attachments"}
 AVATAR_URLS_KEY = "avatarUrls"
 
+# Rich-text regex patterns (compiled once at module load)
+_RE_ISSUE_KEY_IN_TEXT = re.compile(r"\b[A-Z][A-Z0-9]*-\d+\b")
+_RE_ACCOUNTID_INLINE = re.compile(r"\[~accountid:([^\]]+)\]")
+_RE_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_RE_COMPANY_LIKE = re.compile(r"\b([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+)\b")
+_RE_STANDALONE_NUMBER = re.compile(r"\b\d+\b")
+_RE_ISSUE_KEY_PREFIX = re.compile(r"[A-Z][A-Z0-9_]*")
+
 
 def _is_user_role_key(key: Optional[str]) -> bool:
     return key in USER_ROLE_KEYS
@@ -26,6 +34,56 @@ def _is_user_role_key(key: Optional[str]) -> bool:
 
 def _is_activity_list_key(key: Optional[str]) -> bool:
     return key in ACTIVITY_LIST_KEYS
+
+
+# Activity window filtering -------------------------------------------------
+
+def _parse_timestamp(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+class ActivityWindowFilter:
+    """
+    Filters activity-style list items (worklogs, changelog entries, etc.) by
+    an optional inclusive timestamp window [start, end].
+    """
+
+    def __init__(
+        self,
+        start_timestamp: Optional[str],
+        end_timestamp: Optional[str],
+    ) -> None:
+        self._start = _parse_timestamp(start_timestamp)
+        self._end = _parse_timestamp(end_timestamp)
+
+    def keep_timestamp(self, ts_str: str) -> bool:
+        """Return True if the timestamp is inside the window (or no window is set)."""
+        if self._start is None and self._end is None:
+            return True
+        ts = _parse_timestamp(ts_str)
+        if ts is None:
+            return True
+        if self._start is not None and ts < self._start:
+            return False
+        if self._end is not None and ts > self._end:
+            return False
+        return True
+
+    def keep_activity_item(self, item: Any) -> bool:
+        """Return True if the item should be kept (e.g. worklog or changelog entry)."""
+        if not isinstance(item, dict):
+            return True
+        ts_str = item.get("created") or item.get("started")
+        if not isinstance(ts_str, str):
+            return True
+        return self.keep_timestamp(ts_str)
 
 
 class Anonymizer:
@@ -48,8 +106,10 @@ class Anonymizer:
         self._config = config
         self._customfield_map = dict(customfield_map or {})
         self._mappings = mapping_store
-        self._activity_start = self._parse_timestamp(config.activity_start_timestamp)
-        self._activity_end = self._parse_timestamp(config.activity_end_timestamp)
+        self._activity_filter = ActivityWindowFilter(
+            config.activity_start_timestamp,
+            config.activity_end_timestamp,
+        )
 
     def anonymize(self, data: Any) -> Any:
         """
@@ -149,206 +209,137 @@ class Anonymizer:
 
     # Activity filtering (worklog, changelog, etc.) ------------------------
 
-    def _parse_timestamp(self, value: Optional[str]) -> Optional[datetime]:
-        if not value:
-            return None
-        for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
-            try:
-                return datetime.strptime(value, fmt)
-            except ValueError:
-                continue
-        return None
-
-    def _within_activity_window(self, ts_str: str) -> bool:
-        # If no window configured, keep everything.
-        if self._activity_start is None and self._activity_end is None:
-            return True
-
-        ts = self._parse_timestamp(ts_str)
-        if ts is None:
-            # If we can't parse, keep the entry rather than dropping it silently.
-            return True
-
-        if self._activity_start is not None and ts < self._activity_start:
-            return False
-        if self._activity_end is not None and ts > self._activity_end:
-            return False
-        return True
-
     def _maybe_filter_activity_list(
         self, items: Iterable[Any], parent_key: Optional[str]
     ) -> Iterable[Any]:
         if not _is_activity_list_key(parent_key):
             return items
-
-        filtered: list[Any] = []
-        for item in items:
-            if not isinstance(item, dict):
-                filtered.append(item)
-                continue
-            ts_str = item.get("created") or item.get("started")
-            # If there is no timestamp, keep the item unconditionally.
-            if not isinstance(ts_str, str):
-                filtered.append(item)
-                continue
-            # Only filter out items when we have a valid, parseable timestamp.
-            if self._within_activity_window(ts_str):
-                filtered.append(item)
-        return filtered
+        return [item for item in items if self._activity_filter.keep_activity_item(item)]
 
     def _anonymize_rich_text(self, text: str) -> str:
         """
-        Anonymize long, free-form text (e.g. description, comments) by:
-        - Replacing issue keys.
-        - Replacing embedded JIRA accountId references.
-        - Replacing email addresses.
-        - Replacing most standalone numbers (while preserving formatting markers like h2).
-        - Replacing likely company names (sequences of capitalized words).
+        Anonymize long, free-form text (e.g. description, comments) by
+        applying issue-key, accountId, email, company-name, and number
+        replacements in sequence.
         """
+        text = self._replace_issue_keys_in_text(text)
+        text = self._replace_inline_account_ids_in_text(text)
+        text = self._replace_emails_in_text(text)
+        text = self._replace_company_names_in_text(text)
+        text = self._replace_numbers_in_text(text)
+        return text
 
-        # 0) Issue keys like QAE-26 appearing in free text.
-        issue_key_pattern = re.compile(r"\b[A-Z][A-Z0-9]*-\d+\b")
+    def _replace_issue_keys_in_text(self, text: str) -> str:
+        def _repl(match: re.Match[str]) -> str:
+            return self._anonymize_issue_key(match.group(0))
+        return _RE_ISSUE_KEY_IN_TEXT.sub(_repl, text)
 
-        def _issue_key_replace(match: re.Match[str]) -> str:
-            key = match.group(0)
-            return self._anonymize_issue_key(key)
-
-        text = issue_key_pattern.sub(_issue_key_replace, text)
-
-        # 1) Inline JIRA accountId references like [~accountid:5b9b6ae23e56f62be]
-        accountid_pattern = re.compile(r"\[~accountid:([^\]]+)\]")
-
-        def _accountid_replace(match: re.Match[str]) -> str:
-            acct = match.group(1)
-            anon = self._mappings.user_id(acct)
+    def _replace_inline_account_ids_in_text(self, text: str) -> str:
+        def _repl(match: re.Match[str]) -> str:
+            anon = self._mappings.user_id(match.group(1))
             return f"[~accountid:{anon}]"
+        return _RE_ACCOUNTID_INLINE.sub(_repl, text)
 
-        text = accountid_pattern.sub(_accountid_replace, text)
+    def _replace_emails_in_text(self, text: str) -> str:
+        def _repl(match: re.Match[str]) -> str:
+            return self._mappings.email(match.group(0))
+        return _RE_EMAIL.sub(_repl, text)
 
-        # 2) Emails
-        email_pattern = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+    def _replace_company_names_in_text(self, text: str) -> str:
+        def _repl(match: re.Match[str]) -> str:
+            return self._mappings.string(match.group(0))
+        return _RE_COMPANY_LIKE.sub(_repl, text)
 
-        def _email_replace(match: re.Match[str]) -> str:
-            addr = match.group(0)
-            return self._mappings.email(addr)
-
-        text = email_pattern.sub(_email_replace, text)
-
-        # 3) Company-like names: sequences of 2+ capitalized words.
-        company_pattern = re.compile(r"\b([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+)\b")
-
-        def _company_replace(match: re.Match[str]) -> str:
-            name = match.group(0)
-            # Map to a generic value-based pseudonym.
-            return self._mappings.string(name)
-
-        text = company_pattern.sub(_company_replace, text)
-
-        # 4) Numbers: replace standalone numbers, but keep things like "h2"
-        # and avoid re-anonymizing numbers that are already part of
-        # anonymized issue keys (e.g. JIRAPROJ_001-00179).
-        number_pattern = re.compile(r"\b\d+\b")
-
-        def _number_replace(match: re.Match[str]) -> str:
+    def _replace_numbers_in_text(self, text: str) -> str:
+        def _repl(match: re.Match[str]) -> str:
             start = match.start()
             digits = match.group(0)
-            # Preserve formatting markers like "h2", "h3", etc.
             if start > 0:
                 prev_char = text[start - 1]
                 if prev_char in {"h", "H"} and digits in {"1", "2", "3", "4", "5", "6"}:
                     return digits
-                # If this number is immediately preceded by a dash that is
-                # itself preceded by a valid JIRA project key prefix
-                # (uppercase letters/digits), treat it as part of an issue key
-                # and leave it unchanged.
                 if prev_char == "-":
                     i = start - 2
                     while i >= 0 and (text[i].isalnum() or text[i] == "_"):
                         i -= 1
-                    # Extract the candidate prefix.
                     if i < start - 2:
                         prefix = text[i + 1 : start - 1]
-                        # Allow underscores so anonymized project keys like
-                        # JIRAPROJ_001 are treated as valid prefixes and their
-                        # numeric parts are not re-anonymized.
-                        if re.fullmatch(r"[A-Z][A-Z0-9_]*", prefix):
+                        if _RE_ISSUE_KEY_PREFIX.fullmatch(prefix):
                             return digits
             return self._mappings.number(digits, len(digits))
-
-        text = number_pattern.sub(_number_replace, text)
-
-        return text
+        return _RE_STANDALONE_NUMBER.sub(_repl, text)
 
     # Primitive fields -----------------------------------------------------
 
     def _anonymize_primitive_field(self, key: str, value: str, parent_key: str | None = None) -> str:
-        # Description-like long text fields: strip embedded sensitive data.
         if key in RICH_TEXT_KEYS:
             return self._anonymize_rich_text(value)
 
-        # Changelog value fields
+        result = self._anonymize_changelog_field(key, value)
+        if result is not None:
+            return result
+        result = self._anonymize_user_related_field(key, value)
+        if result is not None:
+            return result
+        result = self._anonymize_id_field(key, value)
+        if result is not None:
+            return result
+        result = self._anonymize_url_or_avatar_field(key, value, parent_key)
+        if result is not None:
+            return result
+        result = self._anonymize_customfield_value_field(key, value)
+        if result is not None:
+            return result
+        return value
+
+    def _anonymize_changelog_field(self, key: str, value: str) -> Optional[str]:
         if key in CHANGELOG_NUMERIC_KEYS:
-            # Issue keys like QAE-26
             if re.fullmatch(r"([A-Z][A-Z0-9]*)-(\d+)", value):
                 return self._anonymize_issue_key(value)
-            # Plain numeric IDs (e.g. sprint IDs like 9884)
             if value.isdigit():
                 return self._mappings.number(value, len(value))
-
         if key in CHANGELOG_TEXT_KEYS:
-            # Treat as rich text wherever it appears: anonymize issue keys,
-            # emails, numbers, company names, etc.
             return self._anonymize_rich_text(value)
-
         if key == "fieldId" and value.startswith("customfield_"):
-            # Mirror customfield key renaming for changelog fieldId values,
-            # including any explicit mappings from the customfield map.
             return self._rename_customfield_key(value)
+        return None
 
-        # Emails
+    def _anonymize_user_related_field(self, key: str, value: str) -> Optional[str]:
         if self._config.anonymize_emails and key == "emailAddress":
             return self._mappings.email(value)
-
-        # User identifiers
         if self._config.anonymize_account_ids and key in {"accountId", "name"}:
             return self._mappings.user_id(value)
-
         if key == "displayName" and self._config.anonymize_display_names:
             anon_id = self._mappings.user_id(value)
             return f"User {anon_id.split('_')[-1]}"
+        return None
 
-        # Issue keys (e.g. "ONEANDROID-1179")
+    def _anonymize_id_field(self, key: str, value: str) -> Optional[str]:
         if key == "key":
             return self._anonymize_issue_key(value)
-
-        # Issue numeric IDs (e.g. 10001) usually next to "key"
         if key == "id" and value.isdigit():
             return self._mappings.number(value, len(value))
-
-        # Worklog identifiers
         if key == "worklogId" and value.isdigit():
             return self._mappings.number(value, len(value))
+        return None
 
-        # URLs
-        # Skip when the object containing this "self" was reached via a user-role key
-        # (parent_key is that key). User objects are handled in _anonymize_user_object,
-        # which keeps "self" in sync with accountId and does not pass it through here.
+    def _anonymize_url_or_avatar_field(
+        self, key: str, value: str, parent_key: str | None
+    ) -> Optional[str]:
         if (
             self._config.anonymize_urls
             and key == "self"
             and not _is_user_role_key(parent_key)
         ):
             return self._anonymize_url(value)
-
-        # Avatar URLs under avatarUrls objects
         if parent_key == AVATAR_URLS_KEY:
             return self._anonymize_avatar_url(value)
+        return None
 
-        # Customfield values (if configured)
+    def _anonymize_customfield_value_field(self, key: str, value: str) -> Optional[str]:
         if self._config.anonymize_customfield_values and key.startswith("customfield_"):
             return self._mappings.string(value)
-
-        return value
+        return None
 
     def _anonymize_issue_key(self, value: str) -> str:
         """
