@@ -20,6 +20,13 @@ class AnonymizerConfig:
     activity_end_timestamp: str | None = None
 
 
+def _get_bool(raw: Dict[str, Any], key: str, default: bool) -> bool:
+    value = raw.get(key, default)
+    if isinstance(value, bool):
+        return value
+    return bool(value)
+
+
 def load_config(path: Path) -> AnonymizerConfig:
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
@@ -28,12 +35,12 @@ def load_config(path: Path) -> AnonymizerConfig:
         raw = yaml.safe_load(f) or {}
 
     return AnonymizerConfig(
-        anonymize_users=bool(raw.get("anonymize_users", True)),
-        anonymize_account_ids=bool(raw.get("anonymize_account_ids", True)),
-        anonymize_emails=bool(raw.get("anonymize_emails", True)),
-        anonymize_display_names=bool(raw.get("anonymize_display_names", True)),
-        anonymize_urls=bool(raw.get("anonymize_urls", True)),
-        anonymize_customfield_values=bool(raw.get("anonymize_customfield_values", True)),
+        anonymize_users=_get_bool(raw, "anonymize_users", True),
+        anonymize_account_ids=_get_bool(raw, "anonymize_account_ids", True),
+        anonymize_emails=_get_bool(raw, "anonymize_emails", True),
+        anonymize_display_names=_get_bool(raw, "anonymize_display_names", True),
+        anonymize_urls=_get_bool(raw, "anonymize_urls", True),
+        anonymize_customfield_values=_get_bool(raw, "anonymize_customfield_values", True),
         customfield_map_path=raw.get("customfield_map_path"),
         activity_start_timestamp=raw.get("activity_start_timestamp"),
         activity_end_timestamp=raw.get("activity_end_timestamp"),

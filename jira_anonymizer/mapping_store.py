@@ -1,9 +1,22 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict
+
+
+_MAPPING_FIELDS = (
+    "users",
+    "emails",
+    "urls",
+    "strings",
+    "customfields",
+    "numbers",
+    "project_keys",
+    "avatars",
+)
 
 
 @dataclass
@@ -107,15 +120,15 @@ class MappingStore:
         The replacement:
         - Has the same length as the original token.
         - Preserves dash positions.
+        - Depends only on the input value (not on mapping order or count),
+          so the same token always maps to the same anonymized token,
+          even when new avatars are added later.
         """
         if value in self.avatars:
             return self.avatars[value]
 
-        # Use the current avatar count as a simple, stable index to derive
-        # a hex-only pattern source. This avoids relying on _next_id, which
-        # expects values in the target store to be prefixed with "avatar_".
-        idx = len(self.avatars) + 1
-        pattern_source = f"{idx:x}" + "0123456789abcdef"
+        # Derive a reproducible hex pattern from the value itself.
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
 
         chars = []
         j = 0
@@ -123,7 +136,7 @@ class MappingStore:
             if ch == "-":
                 chars.append("-")
             else:
-                chars.append(pattern_source[j % len(pattern_source)])
+                chars.append(digest[j % len(digest)])
                 j += 1
 
         anonymized = "".join(chars)
@@ -136,29 +149,12 @@ class MappingStore:
             return cls()
         with path.open("r", encoding="utf-8") as f:
             raw = json.load(f)
-        return cls(
-            users=raw.get("users", {}),
-            emails=raw.get("emails", {}),
-            urls=raw.get("urls", {}),
-            strings=raw.get("strings", {}),
-            customfields=raw.get("customfields", {}),
-            numbers=raw.get("numbers", {}),
-            project_keys=raw.get("project_keys", {}),
-            avatars=raw.get("avatars", {}),
-        )
+        kwargs = {field_name: raw.get(field_name, {}) for field_name in _MAPPING_FIELDS}
+        return cls(**kwargs)
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
-            "users": self.users,
-            "emails": self.emails,
-            "urls": self.urls,
-            "strings": self.strings,
-            "customfields": self.customfields,
-            "numbers": self.numbers,
-            "project_keys": self.project_keys,
-            "avatars": self.avatars,
-        }
+        data = {field_name: getattr(self, field_name) for field_name in _MAPPING_FIELDS}
         with path.open("w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, sort_keys=True)
 

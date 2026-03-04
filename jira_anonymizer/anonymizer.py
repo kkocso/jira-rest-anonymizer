@@ -9,6 +9,25 @@ from .config import AnonymizerConfig
 from .mapping_store import MappingStore
 
 
+# Common JIRA-related key constants and helpers -----------------------------
+
+RICH_TEXT_KEYS = {"description", "comment", "body"}
+CHANGELOG_NUMERIC_KEYS = {"from", "to"}
+CHANGELOG_TEXT_KEYS = {"fromString", "toString"}
+ACTIVITY_LIST_KEYS = {"worklog", "worklogs", "changelog", "histories", "comments", "comment"}
+USER_ROLE_KEYS = {"reporter", "assignee", "creator", "author", "updateAuthor", "actor", "user"}
+ATTACHMENT_KEYS = {"attachment", "attachments"}
+AVATAR_URLS_KEY = "avatarUrls"
+
+
+def _is_user_role_key(key: Optional[str]) -> bool:
+    return key in USER_ROLE_KEYS
+
+
+def _is_activity_list_key(key: Optional[str]) -> bool:
+    return key in ACTIVITY_LIST_KEYS
+
+
 class Anonymizer:
     """
     Simple structure-preserving anonymizer for common JIRA REST responses.
@@ -58,7 +77,7 @@ class Anonymizer:
 
         for key, value in obj.items():
             # Drop attachments entirely from the output.
-            if key in {"attachment", "attachments"}:
+            if key in ATTACHMENT_KEYS:
                 continue
 
             # Handle customfield renames at key level.
@@ -157,7 +176,7 @@ class Anonymizer:
     def _maybe_filter_activity_list(
         self, items: Iterable[Any], parent_key: Optional[str]
     ) -> Iterable[Any]:
-        if parent_key not in {"worklog", "worklogs", "changelog", "histories", "comments", "comment"}:
+        if not _is_activity_list_key(parent_key):
             return items
 
         filtered: list[Any] = []
@@ -247,7 +266,10 @@ class Anonymizer:
                     # Extract the candidate prefix.
                     if i < start - 2:
                         prefix = text[i + 1 : start - 1]
-                        if re.fullmatch(r"[A-Z][A-Z0-9]*", prefix):
+                        # Allow underscores so anonymized project keys like
+                        # JIRAPROJ_001 are treated as valid prefixes and their
+                        # numeric parts are not re-anonymized.
+                        if re.fullmatch(r"[A-Z][A-Z0-9_]*", prefix):
                             return digits
             return self._mappings.number(digits, len(digits))
 
@@ -259,11 +281,11 @@ class Anonymizer:
 
     def _anonymize_primitive_field(self, key: str, value: str, parent_key: str | None = None) -> str:
         # Description-like long text fields: strip embedded sensitive data.
-        if key in {"description", "comment", "body"}:
+        if key in RICH_TEXT_KEYS:
             return self._anonymize_rich_text(value)
 
         # Changelog value fields
-        if key in {"from", "to"}:
+        if key in CHANGELOG_NUMERIC_KEYS:
             # Issue keys like QAE-26
             if re.fullmatch(r"([A-Z][A-Z0-9]*)-(\d+)", value):
                 return self._anonymize_issue_key(value)
@@ -271,7 +293,7 @@ class Anonymizer:
             if value.isdigit():
                 return self._mappings.number(value, len(value))
 
-        if key in {"fromString", "toString"}:
+        if key in CHANGELOG_TEXT_KEYS:
             # Treat as rich text wherever it appears: anonymize issue keys,
             # emails, numbers, company names, etc.
             return self._anonymize_rich_text(value)
@@ -311,12 +333,12 @@ class Anonymizer:
         if (
             self._config.anonymize_urls
             and key == "self"
-            and parent_key not in {"reporter", "assignee", "creator", "author", "updateAuthor", "actor", "user"}
+            and not _is_user_role_key(parent_key)
         ):
             return self._anonymize_url(value)
 
         # Avatar URLs under avatarUrls objects
-        if parent_key == "avatarUrls":
+        if parent_key == AVATAR_URLS_KEY:
             return self._anonymize_avatar_url(value)
 
         # Customfield values (if configured)
