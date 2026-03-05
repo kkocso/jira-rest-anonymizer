@@ -1,3 +1,30 @@
+# Project-specific (sensitive or local)
 config/customfield-map.yml
 .anonymizer-mapping.json
+examples/
 
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.eggs/
+*.egg-info/
+*.egg
+
+# Build / dist
+dist/
+build/
+
+# OS
+.DS_Store
+
+# IDE (optional; uncomment if you want)
+# .idea/
+# .vscode/
+# *.swp

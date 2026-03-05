@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import datetime
 import re
 from typing import Any, Dict, Mapping, Iterable, Optional
+from urllib.parse import urlparse, urlunparse
 
 from .config import AnonymizerConfig
 from .mapping_store import MappingStore
@@ -24,7 +25,11 @@ _RE_ISSUE_KEY_IN_TEXT = re.compile(r"\b[A-Z][A-Z0-9]*-\d+\b")
 _RE_ACCOUNTID_INLINE = re.compile(r"\[~accountid:([^\]]+)\]")
 _RE_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _RE_COMPANY_LIKE = re.compile(r"\b([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+)\b")
-_RE_STANDALONE_NUMBER = re.compile(r"\b\d+\b")
+# Match numeric runs that end at a word boundary, even when they are
+# immediately preceded by a letter (e.g. the "2" in "h2"). The caller
+# inspects the preceding character to keep markup-like patterns (h2, H3)
+# while anonymizing most other numbers.
+_RE_STANDALONE_NUMBER = re.compile(r"\d+\b")
 _RE_ISSUE_KEY_PREFIX = re.compile(r"[A-Z][A-Z0-9_]*")
 
 
@@ -38,10 +43,16 @@ def _is_activity_list_key(key: Optional[str]) -> bool:
 
 # Activity window filtering -------------------------------------------------
 
+TIMESTAMP_PARSE_FORMATS: tuple[str, ...] = (
+    "%Y-%m-%dT%H:%M:%S.%f%z",
+    "%Y-%m-%dT%H:%M:%S%z",
+)
+
+
 def _parse_timestamp(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+    for fmt in TIMESTAMP_PARSE_FORMATS:
         try:
             return datetime.strptime(value, fmt)
         except ValueError:
@@ -114,8 +125,39 @@ class Anonymizer:
     def anonymize(self, data: Any) -> Any:
         """
         Return an anonymized deep copy of `data`.
+        A prepass registers all user objects so accountId, email, displayName
+        and name for the same person get the same anonymized id everywhere.
         """
-        return self._walk(deepcopy(data))
+        data_copy = deepcopy(data)
+        self._register_user_object_aliases(data_copy)
+        return self._walk(data_copy)
+
+    def _register_user_object_aliases(self, node: Any) -> None:
+        """
+        Prepass: register (accountId, email, displayName, name) for every user
+        object so they all map to the same anonymized id and every occurrence
+        is replaced consistently.
+        """
+        if isinstance(node, dict):
+            if self._config.anonymize_users and self._looks_like_user(node):
+                account_id = node.get("accountId")
+                email = node.get("emailAddress")
+                display_name = node.get("displayName")
+                name = node.get("name")
+                if isinstance(account_id, str) or isinstance(email, str) or isinstance(
+                    display_name, str
+                ) or isinstance(name, str):
+                    self._mappings.register_person_aliases(
+                        account_id if isinstance(account_id, str) else None,
+                        email if isinstance(email, str) else None,
+                        display_name if isinstance(display_name, str) else None,
+                        name if isinstance(name, str) else None,
+                    )
+            for v in node.values():
+                self._register_user_object_aliases(v)
+        elif isinstance(node, list):
+            for item in node:
+                self._register_user_object_aliases(item)
 
     def _walk(self, node: Any, parent_key: str | None = None) -> Any:
         """
@@ -186,26 +228,16 @@ class Anonymizer:
             if isinstance(self_url, str) and account_id in self_url:
                 user["self"] = self_url.replace(account_id, anon_account_id)
 
-        anon_email_local: str | None = None
         if self._config.anonymize_emails:
             email = user.get("emailAddress")
             if isinstance(email, str):
-                anon_email = self._mappings.email(email)
-                user["emailAddress"] = anon_email
-                anon_email_local = anon_email.split("@", 1)[0]
+                user["emailAddress"] = self._mappings.email(email)
 
         display_name = user.get("displayName")
         if self._config.anonymize_display_names and isinstance(display_name, str):
-            # When an email address is present, derive displayName from the same
-            # underlying anonymized identifier so you can immediately see which
-            # display name belongs to which email. Otherwise, fall back to a
-            # deterministic mapping based on the displayName itself.
-            if anon_email_local:
-                suffix = anon_email_local.split("_")[-1] if "_" in anon_email_local else anon_email_local
-                user["displayName"] = f"User {suffix}"
-            else:
-                anon_id = self._mappings.user_id(display_name)
-                user["displayName"] = f"User {anon_id.split('_')[-1]}"
+            # Same id as accountId/email (registered in prepass), so one person = one "User N".
+            anon_id = self._mappings.user_id(display_name)
+            user["displayName"] = f"User {anon_id.split('_')[-1]}"
 
         name = user.get("name")
         if isinstance(name, str) and self._config.anonymize_account_ids:
@@ -214,22 +246,33 @@ class Anonymizer:
 
         # Decide how to handle the self URL:
         # - When account IDs are anonymized, we keep `self` in sync with the
-        #   anonymized accountId and do not run it through URL anonymization.
+        #   anonymized accountId but still anonymize other numeric identifiers
+        #   in the URL (while preserving the anonymized accountId itself).
         # - When account IDs are left as-is but URL anonymization is enabled,
-        #   we still anonymize numeric identifiers inside the URL like any
-        #   other URL in the payload.
-        anon_self: str | None = None
+        #   we anonymize numeric identifiers inside the URL like any other URL
+        #   in the payload.
         self_url = user.get("self")
-        if isinstance(self_url, str) and not self._config.anonymize_account_ids and self._config.anonymize_urls:
-            anon_self = self._anonymize_url(self_url)
+        if isinstance(self_url, str) and self._config.anonymize_urls:
+            if self._config.anonymize_account_ids and isinstance(account_id, str):
+                # We already replaced the real accountId with its anonymized
+                # counterpart in the URL above; protect that anonymized token
+                # from _anonymize_url while still anonymizing other numbers.
+                anonymized_account_id = user.get("accountId")
+                if isinstance(anonymized_account_id, str):
+                    placeholder = "__ACCOUNT_ID__"
+                    temp_url = self_url.replace(anonymized_account_id, placeholder)
+                    temp_url = self._anonymize_url(temp_url)
+                    user["self"] = temp_url.replace(placeholder, anonymized_account_id)
+            else:
+                # Either account IDs are not being anonymized, or accountId is not a
+                # string we can safely map; in both cases we still anonymize numeric
+                # identifiers in the URL itself.
+                user["self"] = self._anonymize_url(self_url)
 
         result: Dict[str, Any] = {}
         for k, v in user.items():
             if k == "self":
-                if anon_self is not None:
-                    result[k] = anon_self
-                else:
-                    result[k] = self_url
+                result[k] = user["self"]
             else:
                 result[k] = self._walk(v, parent_key=k)
         return result
@@ -390,34 +433,60 @@ class Anonymizer:
 
     def _anonymize_url(self, value: str) -> str:
         """
-        Anonymize URLs by randomizing numeric identifiers inside them while
-        keeping the general structure readable.
-
-        Each distinct digit sequence is replaced with a stable, unique
-        pseudo-random number of the same length.
+        Anonymize URLs by:
+        - Replacing the hostname with a deterministic fake (e.g. jira-001.example.invalid)
+        - Replacing issue keys (PROJECT-NUM) in path/query with anonymized keys
+        - Replacing numeric identifiers with stable pseudonyms of the same length
         """
+        # Replace hostname when value looks like a URL (has a scheme).
+        if "://" in value:
+            try:
+                parsed = urlparse(value)
+                if parsed.netloc:
+                    new_netloc = self._mappings.host(parsed.netloc)
+                    value = urlunparse((
+                        parsed.scheme,
+                        new_netloc,
+                        parsed.path,
+                        parsed.params,
+                        parsed.query,
+                        parsed.fragment,
+                    ))
+            except Exception:
+                pass
 
+        # Replace issue keys (e.g. ONEAPPLE-0002) anywhere in the URL.
+        def _repl_key(match: re.Match[str]) -> str:
+            return self._anonymize_issue_key(match.group(0))
+        value = _RE_ISSUE_KEY_IN_TEXT.sub(_repl_key, value)
+
+        # Replace digit sequences with stable pseudonyms.
         def _replace(match: re.Match[str]) -> str:
             digits = match.group(0)
             return self._mappings.number(digits, len(digits))
-
         return re.sub(r"\d+", _replace, value)
 
     def _anonymize_avatar_url(self, value: str) -> str:
         """
-        Anonymize avatar URLs by replacing the long avatar token segment
-        with a deterministic, same-length pseudonym, preserving dashes.
+        Anonymize avatar URLs by replacing token segments with deterministic,
+        same-length pseudonyms. Handles both dashed tokens (e.g. d77f72c1-4447-...)
+        and long undashed hex IDs (e.g. 617ad324327da4006947b9c1 in the path).
         """
-
-        # Match one or more hex segments separated by dashes, with no fixed
-        # requirements on segment length or count (e.g. "abc-def-1234-56").
-        pattern = re.compile(r"[0-9a-fA-F]+(?:-[0-9a-fA-F]+)+")
 
         def _replace(match: re.Match[str]) -> str:
             token = match.group(0)
             return self._mappings.avatar_token(token)
 
-        return pattern.sub(_replace, value)
+        # 1) Dashed hex tokens (e.g. d77f72c1-4447-5064-781a-8dc376149dcd).
+        dashed = re.compile(r"[0-9a-fA-F]+(?:-[0-9a-fA-F]+)+")
+        value = dashed.sub(_replace, value)
+
+        # 2) Long undashed hex segments (e.g. 617ad324327da4006947b9c1 in path).
+        # Minimum length 12 to avoid replacing short hex like "48" in "/48".
+        undashed = re.compile(r"[0-9a-fA-F]{12,}")
+        value = undashed.sub(_replace, value)
+
+        return value
 
     # Customfield key renaming ---------------------------------------------
 

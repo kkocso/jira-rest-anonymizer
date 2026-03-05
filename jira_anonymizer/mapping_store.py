@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict
@@ -16,6 +17,7 @@ _MAPPING_FIELDS = (
     "numbers",
     "project_keys",
     "avatars",
+    "hosts",
 )
 
 
@@ -36,6 +38,7 @@ class MappingStore:
     numbers: Dict[str, str] = field(default_factory=dict)
     project_keys: Dict[str, str] = field(default_factory=dict)
     avatars: Dict[str, str] = field(default_factory=dict)
+    hosts: Dict[str, str] = field(default_factory=dict)
 
     def _next_id(self, prefix: str, existing: Dict[str, str]) -> str:
         current_ids = [
@@ -56,9 +59,61 @@ class MappingStore:
     def user_id(self, value: str) -> str:
         return self._get_or_create(value, self.users, "user")
 
+    def _merge_user_id_into(self, target_id: str, source_id: str) -> None:
+        """
+        Reassign every key in self.users that currently maps to source_id
+        to target_id, so one canonical id wins and displayName/email stay consistent.
+        """
+        if source_id == target_id:
+            return
+        for k, v in list(self.users.items()):
+            if v == source_id:
+                self.users[k] = target_id
+
+    def register_person_aliases(
+        self,
+        account_id: str | None,
+        email: str | None,
+        display_name: str | None,
+        name: str | None,
+    ) -> None:
+        """
+        Register that accountId, email, displayName, and name belong to the same
+        person so they all get the same anonymized user id everywhere.
+        When multiple identifiers already map to different ids (e.g. from earlier
+        runs or other files), they are merged into one canonical id so displayName
+        and email stay consistent across all occurrences.
+        """
+        identifiers = [
+            (account_id, "accountId"),
+            (email, "email"),
+            (display_name, "displayName"),
+            (name, "name"),
+        ]
+        present = [(v, kind) for v, kind in identifiers if v]
+        if not present:
+            return
+
+        # Prefer accountId > email > displayName > name as canonical so we merge to a stable id.
+        canonical_value = (
+            account_id
+            or email
+            or display_name
+            or name
+        )
+        canonical_id = self.user_id(canonical_value)
+
+        for value, _ in present:
+            if value == canonical_value:
+                continue
+            existing_id = self.users.get(value)
+            if existing_id is not None and existing_id != canonical_id:
+                self._merge_user_id_into(canonical_id, existing_id)
+            self.users[value] = canonical_id
+
     def email(self, value: str) -> str:
-        # Use a deterministic fake domain to avoid accidentally looking real.
-        local = self._get_or_create(value, self.emails, "user")
+        # Use the same user id as for accountId/displayName so one person = one id.
+        local = self.user_id(value)
         return f"{local}@example.invalid"
 
     def url(self, value: str) -> str:
@@ -113,6 +168,25 @@ class MappingStore:
         """
         return self._get_or_create(value, self.project_keys, "JIRAPROJ")
 
+    def host(self, value: str) -> str:
+        """
+        Generate a unique, stable replacement for a URL hostname (e.g. JIRA domain).
+
+        For example, "accedobroadband.jira.com" might become "jira-001.example.invalid".
+        """
+        if value in self.hosts:
+            return self.hosts[value]
+        current = [
+            int(m.group(1))
+            for v in self.hosts.values()
+            for m in [re.search(r"^jira-(\d+)\.example\.invalid$", v)]
+            if m
+        ]
+        next_index = max(current, default=0) + 1
+        anonymized = f"jira-{next_index:03d}.example.invalid"
+        self.hosts[value] = anonymized
+        return anonymized
+
     def avatar_token(self, value: str) -> str:
         """
         Generate a unique, stable replacement for avatar URL tokens.
@@ -150,7 +224,11 @@ class MappingStore:
         with path.open("r", encoding="utf-8") as f:
             raw = json.load(f)
         kwargs = {field_name: raw.get(field_name, {}) for field_name in _MAPPING_FIELDS}
-        return cls(**kwargs)
+        store = cls(**kwargs)
+        # Legacy: emails stored email -> local part; ensure user_id(email) returns it.
+        for e, local in store.emails.items():
+            store.users.setdefault(e, local)
+        return store
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
