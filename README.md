@@ -117,12 +117,23 @@ are also anonymized:
 
 All attachment data is removed from the output entirely: any `attachment` or `attachments` fields (and their contents) are dropped from the anonymized JSON.
 
+## How it works internally
+
+At a high level the anonymization pipeline works like this:
+
+- **CLI orchestration**: `python -m jira_anonymizer.cli` parses options (`--input`, `--output`, `--config`, `--customfield-map`, `--mapping-store`), then loads config, customfield map, and the persistent mapping store.
+- **Prepass for user identities**: before rewriting anything, the anonymizer scans the JSON to find all JIRA user objects and registers their `accountId`, `emailAddress`, `displayName`, and `name` as aliases for a single internal user id.
+- **Recursive traversal**: the anonymizer deep-copies the JSON and walks it recursively, dropping attachments, renaming `customfield_*` keys, and routing scalar values through specialized anonymizers.
+- **Field-level anonymization**: user dictionaries, rich-text fields, changelog/worklog entries, numeric IDs, URLs (including avatar URLs), issue keys, and customfield values are rewritten according to the configuration and mapping store.
+- **Output + persistence**: the anonymized JSON is written to the requested output path and the mapping store is saved so subsequent runs preserve all previously assigned pseudonyms.
+
 ## Mapping store (`.anonymizer-mapping.json`)
 
 The anonymizer keeps a **deterministic mapping** from real values to anonymized ones in a JSON file (by default `.anonymizer-mapping.json`):
 
 - It stores mappings for users, emails, URLs, generic strings, customfield keys, numeric IDs, project keys, avatar tokens, etc.
 - This ensures that the **same real value** is always replaced by the **same fake value** across runs.
+- When a JIRA user object contains multiple identifiers (for example `accountId`, `emailAddress`, `displayName`, and `name`), those identifiers are merged so they all resolve to a single internal `user_N` id, ensuring the same person has consistent anonymized accountId, email, and displayName across files and runs.
 
 You normally do not need to create this file manually:
 

@@ -2,6 +2,7 @@
 config/customfield-map.yml
 .anonymizer-mapping.json
 examples/
+walkthrough.md
 
 # Virtual environments
 .venv/
